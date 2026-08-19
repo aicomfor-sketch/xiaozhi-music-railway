@@ -8,6 +8,7 @@
  * Protocol: MCP JSON-RPC 2.0 over WebSocket
  * Designed for Railway.app deployment (env PORT)
  */
+import http from 'http';
 import { WebSocketServer } from 'ws';
 import Meting from './lib/meting/meting.js';
 
@@ -245,8 +246,26 @@ async function handleMessage(data) {
   }
 }
 
+// ─── HTTP server (Railway healthcheck) ──────────────────────────
+const httpServer = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: 'Not found' }));
+});
+
 // ─── WebSocket server ───────────────────────────────────────────
-const wss = new WebSocketServer({ port: PORT, host: HOST });
+// Shares the same HTTP server/port so Railway's healthcheck (HTTP)
+// and the MCP WebSocket API can both be served on PORT.
+const wss = new WebSocketServer({ server: httpServer });
+
+httpServer.listen(PORT, HOST, () => {
+  console.log(`[ready] http://${HOST}:${PORT}/healthz  |  Healthcheck endpoint`);
+});
 
 wss.on('connection', (ws, req) => {
   const addr = req.socket.remoteAddress;
