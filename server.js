@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 /**
- * xiaozhi-music-railway — Real music MCP WebSocket server
+ * xiaozhi-music-railway — Real music MCP SSE server
  *
  * Uses Meting (metowolf/Meting) to search and fetch playable URLs
  * from Netease, Tencent/QQ, Kugou, and Kuwo music platforms.
  *
- * Protocol: MCP JSON-RPC 2.0 over WebSocket
+ * Protocol: MCP JSON-RPC 2.0 over HTTP Server-Sent Events (SSE)
  * Designed for Railway.app deployment (env PORT)
  */
 import http from 'http';
-import { WebSocketServer } from 'ws';
 import Meting from './lib/meting/meting.js';
 
 // ─── Config ────────────────────────────────────────────────────
@@ -246,57 +245,84 @@ async function handleMessage(data) {
   }
 }
 
-// ─── HTTP server (Railway healthcheck) ──────────────────────────
-const httpServer = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/healthz') {
+// ─── HTTP Server with SSE support ───────────────────────────────
+const server = http.createServer((req, res) => {
+  const { method, url } = req;
+
+  // Healthcheck endpoint
+  if (method === 'GET' && url === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
     return;
   }
 
+  // SSE endpoint for MCP
+  if (method === 'POST' && url === '/sse') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+
+    let buffer = '';
+
+    req.on('data', async (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        try {
+          const data = JSON.parse(line);
+          const response = await handleMessage(data);
+          if (response) {
+            res.write(`data: ${JSON.stringify(response)}\n\n`);
+          }
+        } catch (err) {
+          console.error('SSE parse error:', err);
+          res.write(`data: ${JSON.stringify({
+            jsonrpc: '2.0', id: null,
+            error: { code: -32700, message: 'Parse error' }
+          })}\n\n`);
+        }
+      }
+    });
+
+    req.on('end', () => {
+      res.end();
+    });
+
+    req.on('error', (err) => {
+      console.error('SSE request error:', err);
+      res.end();
+    });
+
+    return;
+  }
+
+  // Root endpoint
+  if (method === 'GET' && url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      name: 'xiaozhi-music-railway',
+      version: '1.0.0',
+      protocol: 'MCP 2024-11-05',
+      transport: 'HTTP SSE',
+      endpoints: {
+        sse: '/sse (POST)',
+        healthcheck: '/healthz (GET)'
+      }
+    }, null, 2));
+    return;
+  }
+
+  // 404
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: 'Not found' }));
 });
 
-// ─── WebSocket server ───────────────────────────────────────────
-// Shares the same HTTP server/port so Railway's healthcheck (HTTP)
-// and the MCP WebSocket API can both be served on PORT.
-const wss = new WebSocketServer({ server: httpServer });
-
-httpServer.listen(PORT, HOST, () => {
-  console.log(`[ready] http://${HOST}:${PORT}/healthz  |  Healthcheck endpoint`);
-});
-
-wss.on('connection', (ws, req) => {
-  const addr = req.socket.remoteAddress;
-  console.log(`[connect] ${addr}`);
-
-  ws.on('message', async (raw) => {
-    let data;
-    try {
-      data = JSON.parse(raw.toString());
-    } catch {
-      ws.send(JSON.stringify({
-        jsonrpc: '2.0', id: null,
-        error: { code: -32700, message: 'Parse error' }
-      }));
-      return;
-    }
-
-    const response = await handleMessage(data);
-    if (response) {
-      ws.send(JSON.stringify(response));
-    }
-  });
-
-  ws.on('close', () => {
-    console.log(`[disconnect] ${addr}`);
-  });
-
-  ws.on('error', (err) => {
-    console.error(`[error] ${addr}:`, err.message);
-  });
-});
-
-console.log(`[ready] wss://${HOST}:${PORT}  |  Music MCP Server (Meting)`);
-console.log(`[ready] Platforms: ${PLATFORMS.join(', ')}`);
+server.listen(PORT, HOST, () => {
+  console.log(`[ready] http://${HOST}:${PORT}  |  Music MCP Server (SSE)`);\n  console.log(`[ready] http://${HOST}:${PORT}/sse  |  MCP SSE endpoint`);\n  console.log(`[ready] http://${HOST}:${PORT}/healthz  |  Healthcheck endpoint`);\n  console.log(`[ready] Platforms: ${PLATFORMS.join(', ')}`);\n});\n\nserver.on('error', (err) => {\n  console.error('Server error:', err);\n  process.exit(1);\n});\n
